@@ -33,7 +33,7 @@
 
 #define phi_back 1e-3
 
-//#define het_min 0.8     // as multiplicator close to 1
+//#define het_min 0.8     // multiplicativ factor for the heterogeneity
 //#define het_max 1.2
 
 
@@ -121,37 +121,36 @@ static PyObject* py_zbke_network(PyObject *self, PyObject *args)
 {
  
 
-    PyArrayObject *x_py, *z_py, *hetero_py,*w_py,*phi_py,*lap_py;
+    PyArrayObject *x_py, *z_py, *hetero_py,*lap_py;
 
-    double        *x, *z, *w,*hetero,*lap,time,dt;
+    double        *x, *z, *hetero,*lap,time,dt,phi;
     
     
 
-    if(!PyArg_ParseTuple(args, "O!O!O!O!dd", &PyArray_Type, &x_py,   &PyArray_Type, &z_py, 
-                        					   &PyArray_Type, &lap_py,  
-                        					   &PyArray_Type, &hetero_py,       
-                        					   &time, &dt))
+    if(!PyArg_ParseTuple(args, "O!O!O!O!ddd", &PyArray_Type, &x_py,   &PyArray_Type, &z_py, 
+                        					  &PyArray_Type, &lap_py,  
+                        					  &PyArray_Type, &hetero_py, &phi,      
+                        					  &time, &dt))
     {
         printf("\nerror in input tuple parsing\n");
         return NULL;
     }
     /*
-		x_py      - x component of the zbke model (1d numpy array, double)
-		z_py      - z component of the zbke model (1d numpy array, double)
-		lap_py    - laplace matrix of the network (1d numpy array, double)
-		hetero_py - heterogeneity of the network unit (1d numpy array, double)
+		x_py      - x component of the zbke model (1d numpy array (len:n_net), double)
+		z_py      - z component of the zbke model (1d numpy array (len:n_net), double)
+		lap_py    - laplace matrix of the network (1d numpy array (len:n_net*n_net, double)
+		hetero_py - heterogeneity of the network unit (1d numpy array (len:n_net), double)
 		phi_back  - background light intensity in the zbke model (double)
 		time      - time to integrate the zbke model (double)
 		dt        - timestep discretization (double)
-
     */
 
-    // number of euler steps
-    const long steps = (long) (time/dt);
 
+    // number of euler steps
+    const long steps    = (long) (time/dt);
 	const double c3_net = dt/eps1;
 
-    long i,j,k,l,zpre,zdel;
+    long i,j,k,l;
               
     // set pointers
     x          = pyvector_to_Carrayptrs(x_py);    
@@ -164,18 +163,18 @@ static PyObject* py_zbke_network(PyObject *self, PyObject *args)
     int n_net = z_py->dimensions[0];
 
 
-    // parameter checks
+    //+--- parameter and array dimension check 
 	if(   ((n_net) != hetero_py->dimensions[0]) ^ ((n_net) != x_py->dimensions[0])  )
-    {   printf("\n wrong dimension in components \n");   return NULL;    }
+    {   printf("\n wrong dimension in x,z components \n");   return NULL;    }
 
 	if(   ((n_net*n_net) != lap_py->dimensions[0]) )
     {   printf("\n wrong dimension in laplace matrix \n");   return NULL;    }
 
-	if(  (dt  < 1e-6)  ^  (dt > 1e-4) )
-    {   printf("\n stepsize dt should be in [1e-6,1e-4] \n");   return NULL;    }
+	if(  (dt  < 1e-6)  ^  (dt > 2e-4) )
+    {   printf("\n stepsize dt should be in [1e-6,2e-4] to ensure convergence save compution time \n");   return NULL;    }
 
 
-    double  *c_4_het, // network heterogeneity
+    double  *c_4_het, // node heterogeneity
     		*inter;   // network interaction
 
     c_4_het = malloc( n_net * sizeof(double));
@@ -187,14 +186,14 @@ static PyObject* py_zbke_network(PyObject *self, PyObject *args)
     
 
     
-    //+------------ euler steps ---------------------------
-    for( long i=0;i<steps;i++ )
+    //+--------------- euler steps ---------------------------
+    for( i=0;i<steps;i++ )
     {
 
 		// calculate the network interaction
         for( int k=0;k<n_net;k++ )
         {
-             inter[k]  =  phi_back;
+             inter[k]  =  phi;
              int ix= k*n_net;
              for( int j=0; j<n_net;j++ )   inter[k] +=  lap[ix+j] *z[j];
         }
@@ -206,9 +205,6 @@ static PyObject* py_zbke_network(PyObject *self, PyObject *args)
 			double zpre = z[k];
             dxdz_dt( x[k], z[k], zpre, c_4_het[k], inter[k], dt,c3_net );
         }
-
-        
-
 
     }//+-------------- END EULER LOOP -------------------
 
@@ -321,7 +317,7 @@ static PyObject* py_zbke_stdp(PyObject *self, PyObject *args)
 
     
 
-    //+-- copy values once
+    //+-- define heterogeneity and allocate memory for peaks
     double *c_4_het;
     c_4_het = malloc( n_stdp*sizeof(double));
                   
@@ -334,7 +330,7 @@ static PyObject* py_zbke_stdp(PyObject *self, PyObject *args)
 
 
 
-    //printf("\nbefore checks\n");
+    // checks dimensions of input arrays
     if(   ((n_stdp) != z_py->dimensions[0]) ^ ((n_stdp) != x_py->dimensions[0])  )
     {   printf("\n wrong dimension in components \n");   return NULL;    }
     
@@ -496,16 +492,6 @@ static PyObject* py_zbke_nullclines(PyObject *self, PyObject *args)
 	
 	double nx = (1./eps1)*( phi + (mu-xpy)/(mu+xpy)*(beta + het*c4*f2) + c5*uss*uss + f1*uss - xpy*xpy - xpy );
     double nz = 2.0*phi + f1*uss - alph*f2 ; 
-
-
-
-//#define dxdz_dt(x,z,z_pre,C_4,phi,dt_loc,c_drei_loc)  { \
-//	double f1  = 1.0 - z_pre,\
-//	       f2  = z_pre/(eps3 + f1),\
-//	       uss = c1 * ( sqrt(c2*x + z_pre*z_pre - 2.0*z_pre + 1.0) -f1 );\
-//           x  += c_drei_loc*( phi + (mu-x)/(mu+x)*(beta+C_4*f2) + c5*uss*uss + f1*uss - x*x - x );\
-//           z   = z_pre + dt_loc*( 2.0*phi + f1*uss - alph*f2 ); }
-
 
 
     return Py_BuildValue("(dd)",nx,nz);
